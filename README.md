@@ -1,2 +1,2 @@
 # MothMath-expression
-expression evaluation and parsing library for calculator
+expression evaluation and parsing library for calculators
