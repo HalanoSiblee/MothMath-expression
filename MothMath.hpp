@@ -1,13 +1,14 @@
 #pragma once
 /* MothMath.hpp — tiny header-only expression evaluator (C++17)
  *
- *   auto r = expr::evaluate("1,500 + 1,500");   // 3000
- *   expr::format_number(*r);                    // "3,000"
- *   expr::format_number(*r, true);              // "3,000"
- *   expr::format_number(*r, false);             // "3000"
+ *   expr::evaluate("1.5k + 50%");     // 1500.5
+ *   expr::format_number(1500, true);            // "1,500"
+ *   expr::format_number(1500, false);           // "1500"
+ *   expr::format_number(1500, false, true);     // "1.5k"
  *
- * Operators: + - * / ^  unary +/-  ( )
- * Precedence: ^ > * / > + -   (^ right-assoc)
+ * Operators: + - * / ^  unary +/-  ( )  postfix %
+ * Suffixes:  k=1e3  m=1e6  b=1e9  t=1e12  q=1e15  (case-insensitive)
+ * Precedence: % > ^ > * / > + -   (^ right-assoc)
  * Commas in input are ignored.
  */
 #include <cctype>
@@ -21,6 +22,17 @@
 
 namespace expr {
 namespace detail {
+
+inline double metric_mul(char c) {
+    switch (c | 32) { // tolower
+        case 'k': return 1e3;
+        case 'm': return 1e6;
+        case 'b': return 1e9;
+        case 't': return 1e12;
+        case 'q': return 1e15;
+        default:  return 0;
+    }
+}
 
 struct P {
     std::string_view s;
@@ -50,7 +62,15 @@ struct P {
         if (t.empty()) return fail("Invalid number");
         char *e = nullptr;
         o = strtod(t.c_str(), &e);
-        return e != t.c_str() || fail("Invalid number");
+        if (e == t.c_str()) return fail("Invalid number");
+
+        // metric suffix: 1.5k  2M  3b ...
+        skip();
+        if (i < s.size()) {
+            double mul = metric_mul(s[i]);
+            if (mul > 0) { o *= mul; ++i; }
+        }
+        return true;
     }
 
     bool primary(double &o) {
@@ -61,9 +81,16 @@ struct P {
             skip();
             if (i >= s.size() || s[i] != ')') return fail("Missing ')'");
             ++i;
-            return true;
+        } else {
+            if (!num(o)) return false;
         }
-        return num(o);
+        // postfix %  (50% → 0.5, (10+10)% → 0.2)
+        skip();
+        if (i < s.size() && s[i] == '%') {
+            ++i;
+            o *= 0.01;
+        }
+        return true;
     }
 
     bool unary(double &o) {
@@ -115,7 +142,6 @@ struct P {
 
 } /* detail */
 
-/** Evaluate expression. Returns nullopt on error. */
 inline std::optional<double> evaluate(std::string_view in)
 {
     detail::P p(in);
@@ -128,7 +154,6 @@ inline std::optional<double> evaluate(std::string_view in)
     return v;
 }
 
-/** Evaluate with error string. */
 inline bool eval(std::string_view in, double &out, std::string &err)
 {
     detail::P p(in);
@@ -144,13 +169,33 @@ inline bool eval(std::string_view in, double &out, std::string &err)
 
 /**
  * Format a number.
- *   format_number(3000)        → "3,000"
- *   format_number(3000, false) → "3000"
+ *   separators: thousand commas
+ *   metric:     k m b t q suffixes (1.5k, 2m, …)
+ * metric wins over separators when both true.
  */
-inline std::string format_number(double v, bool separators = true)
+inline std::string format_number(double v, bool separators = true, bool metric = false)
 {
     if (!std::isfinite(v)) return "Error";
     if (std::fabs(v) < 1e-15) v = 0;
+
+    if (metric) {
+        const struct { double lim; const char *suf; } tab[] = {
+            {1e15, "q"}, {1e12, "t"}, {1e9, "b"}, {1e6, "m"}, {1e3, "k"},
+        };
+        double av = std::fabs(v);
+        for (auto &e : tab) {
+            if (av >= e.lim) {
+                double s = v / e.lim;
+                char b[64];
+                // up to 6 significant digits, strip trailing zeros
+                std::snprintf(b, sizeof b, "%.6g", s);
+                std::string o(b);
+                o += e.suf;
+                return o;
+            }
+        }
+        // below 1k — fall through to plain/separators
+    }
 
     if (std::fabs(v) >= 1e15 || (std::fabs(v) > 0 && std::fabs(v) < 1e-6)) {
         char b[64];

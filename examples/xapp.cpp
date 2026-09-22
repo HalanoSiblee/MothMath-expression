@@ -1,6 +1,6 @@
 /*
 X11+Xft expr calc |
- q/Esc quit | Enter eval | c copy | f seps | u use | Home/End/←→ | Shift+move select | Del clear
+// Esc quit | Enter eval | F1 seps | F2 metric | F3 copy | F4 use | Del nuke | Shift+move select
 
 g++ -O3 -flto -march=native -mtune=native -ffast-math -fno-exceptions -fno-rtti \
   -DNDEBUG xapp.cpp $(pkg-config --cflags --libs xft) -lX11 -o mothcalc -s
@@ -9,7 +9,6 @@ clang++ -O3 -flto -march=native -mtune=native -ffast-math -fno-exceptions -fno-r
   -DNDEBUG xapp.cpp $(pkg-config --cflags --libs xft) -lX11 -o mothcalc -s
   
 strip mothcalc
-
 */  
 #include "../MothMath.hpp"
 #include <X11/Xlib.h>
@@ -28,7 +27,7 @@ static constexpr unsigned long COL_BG     = 0x000000;
 static constexpr unsigned long COL_INPUT  = 0xFFFFFF;
 static constexpr unsigned long COL_OUTPUT = 0xCCCCCC;
 static constexpr unsigned long COL_HINT   = 0x444444;
-static constexpr unsigned long COL_SEL    = 0xA1A1A1;
+static constexpr unsigned long COL_SEL    = 0x264F78;  // selection highlight
 
 struct Flash {
     unsigned long copy  = 0x00FF88;
@@ -51,6 +50,7 @@ static std::string input, result, clipbuf;
 static size_t cursor;
 static ssize_t sel_anchor = -1;   // -1 = no selection
 static bool seps = true;
+static bool metric = false;
 static int W = 560, H = 160;
 static double font_px;
 static unsigned long flash_col;
@@ -166,8 +166,9 @@ static void draw() {
     }
 
     // hint
-    const char *hint = seps ? "f seps | c copy | u use | q quit"
-                            : "f plain | c copy | u use | q quit";
+    char hint[64];
+    snprintf(hint, sizeof hint, "F1 %s | F2 %s | F3 copy | F4 use | Esc quit",
+             seps ? "seps" : "plain", metric ? "metric" : "raw");
     if (font_hint) {
         XGlyphInfo hext;
         XftTextExtentsUtf8(dpy, font_hint, (FcChar8 *)hint, (int)strlen(hint), &hext);
@@ -213,7 +214,7 @@ static void eval() {
     double v;
     std::string err;
     if (expr::eval(input, v, err)) {
-        result = expr::format_number(v, seps);
+        result = expr::format_number(v, seps, metric);
         flash_col = 0;
     } else {
         result = err.empty() ? "Error" : err;
@@ -232,10 +233,17 @@ static void copy() {
 
 static void use_result() {
     if (result.empty()) return;
-    for (char c : result)
-        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return;
-    input.clear();
-    for (char c : result) if (c != ',') input += c;
+    // re-eval so we always push the numeric value back (handles metric/seps)
+    double v;
+    std::string err;
+    // strip commas only for re-parse; keep k/m/b/t/q/%
+    std::string clean;
+    for (char c : result) if (c != ',') clean += c;
+    if (!expr::eval(clean, v, err)) return;
+    // put plain number into input (no commas)
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "%.15g", v);
+    input = buf;
     cursor = input.size();
     clear_sel();
     result.clear();
@@ -333,16 +341,32 @@ int main() {
             int n = XLookupString(&ev.xkey, ch, sizeof ch, &ks, nullptr);
             bool shift = ev.xkey.state & ShiftMask;
 
-            if (ks == XK_Escape || ks == XK_q || ks == XK_Q) goto done;
+            if (ks == XK_Escape) goto done;
             if (ks == XK_Return || ks == XK_KP_Enter) { eval(); break; }
-            if (ks == XK_c || ks == XK_C) { copy(); break; }
-            if (ks == XK_u || ks == XK_U) { use_result(); break; }
-            if (ks == XK_f || ks == XK_F) {
+            if (ks == XK_F3) { copy(); break; }
+            if (ks == XK_F4) { use_result(); break; }
+            if (ks == XK_F1) {
                 seps = !seps;
                 if (!result.empty()) {
                     bool ok = true;
                     for (char c : result)
                         if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) { ok = false; break; }
+                    if (ok) eval();
+                    else draw();
+                } else draw();
+                break;
+            }
+            if (ks == XK_F2) {
+                metric = !metric;
+                if (!result.empty()) {
+                    bool ok = true;
+                    for (char c : result)
+                        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+                            // allow metric suffixes k m b t q
+                            char lc = c | 32;
+                            if (lc=='k'||lc=='m'||lc=='b'||lc=='t'||lc=='q') continue;
+                            ok = false; break;
+                        }
                     if (ok) eval();
                     else draw();
                 } else draw();
